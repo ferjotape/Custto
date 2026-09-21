@@ -35,19 +35,13 @@ type MarkupCalc = {
 };
 
 /**
- * Markup a partir das Configurações de Custos, independente de uma receita
- * específica: markup = 1 / (1 - (custos fixos % + custos variáveis % + extraPct)).
- * `extraPct` é o lucro desejado (receitas individuais, via computeMarkupFromCostSettings)
- * ou a margem de segurança de um combo (via computeComboMinPrice) — mesma fórmula,
- * mesmas frações de custo fixo/variável, só troca o que entra como "fatia extra".
- * Usado por computeRecipePricing (por receita), pelo indicador de "markup atual"
- * do dashboard e pelo preço mínimo de combos.
+ * Markup ideal a partir das Configurações de Custos, independente de uma
+ * receita específica: markup = 1 / (1 - (custos fixos % + custos variáveis %
+ * + lucro desejado %)). Fonte única do markup usado por computeRecipePricing
+ * (por receita), computeComboPricing (combos) e pelo indicador de "markup
+ * atual" do dashboard — nunca uma fórmula própria para cada um.
  */
-function computeMarkupWithExtra(
-  costSettings: CostSettingsCalcInput,
-  extraPct: number,
-  extraLabel: string = "lucro desejado"
-): MarkupCalc {
+function computeMarkupFromCostSettings(costSettings: CostSettingsCalcInput): MarkupCalc {
   const fixedCostsTotal = costSettings.fixed_costs.reduce((sum, item) => sum + item.value, 0);
   const hasRevenueEstimate = Boolean(
     costSettings.avg_monthly_revenue && costSettings.avg_monthly_revenue > 0
@@ -58,7 +52,7 @@ function computeMarkupWithExtra(
   const variablePct =
     (costSettings.card_fee_pct + costSettings.packaging_pct + costSettings.free_delivery_pct) /
     100;
-  const profitPct = extraPct;
+  const profitPct = costSettings.desired_profit_pct / 100;
 
   // Faturamento médio informado, mas menor que os custos fixos (+ variáveis): o
   // cálculo do markup não fecha de jeito nenhum. Em vez de tentar "consertar" com
@@ -85,21 +79,16 @@ function computeMarkupWithExtra(
     if (fixedPct > maxFixedPct) {
       fixedPct = maxFixedPct;
       divisor = 1 - (fixedPct + variablePct + profitPct);
-      warning = `Os custos fixos, em relação ao faturamento médio mensal informado, são altos demais para caber integralmente no preço junto com o ${extraLabel}. Consideramos uma fatia menor deles — revise o faturamento médio mensal ou os custos fixos em Configurações de Custos para um cálculo mais preciso.`;
+      warning = "Os custos fixos, em relação ao faturamento médio mensal informado, são altos demais para caber integralmente no preço junto com o lucro desejado. Consideramos uma fatia menor deles — revise o faturamento médio mensal ou os custos fixos em Configurações de Custos para um cálculo mais preciso.";
     }
 
     if (divisor < MIN_MARKUP_DIVISOR) {
       divisor = MIN_MARKUP_DIVISOR;
-      warning = `A soma das taxas variáveis com o ${extraLabel} está muito próxima de (ou passa de) 100% do preço de venda. Calculamos um preço com margem de segurança mínima — revise o ${extraLabel} ou as taxas variáveis em Configurações de Custos.`;
+      warning = "A soma das taxas variáveis com o lucro desejado está muito próxima de (ou passa de) 100% do preço de venda. Calculamos um preço com margem de segurança mínima — revise o lucro desejado ou as taxas variáveis em Configurações de Custos.";
     }
   }
 
   return { markup: 1 / divisor, variablePct, issue: null, warning };
-}
-
-/** Markup ideal por receita: computeMarkupWithExtra usando o lucro desejado do usuário. */
-function computeMarkupFromCostSettings(costSettings: CostSettingsCalcInput): MarkupCalc {
-  return computeMarkupWithExtra(costSettings, costSettings.desired_profit_pct / 100);
 }
 
 export type RecipePricingResult = {
@@ -351,114 +340,36 @@ export function aggregateRecipeCosts(
 }
 
 // =========================================================
-// Precificação de combos (3 preços: mínimo, recomendado, promocional)
+// Precificação de combos (preço único)
 // =========================================================
 
-export type ComboSafetyMarginType = "5" | "10" | "custom";
-
-/** Converte o tipo de margem de segurança escolhido numa fração (ex: 0.1 para 10%). */
-export function resolveSafetyMarginPct(
-  type: ComboSafetyMarginType,
-  customPct: number | null
-): number {
-  if (type === "5") return 0.05;
-  if (type === "custom") return (customPct ?? 0) / 100;
-  return 0.1;
-}
-
-export type ComboMinPriceResult = {
-  minPrice: number | null;
+export type ComboPricingResult = {
+  suggestedPrice: number | null;
+  /** Fração (ex: 0.1 para 10%) da soma de taxa de cartão + embalagem + entrega grátis. */
   variablePct: number;
   issue: RecipePricingIssue | null;
   warning: string | null;
 };
 
 /**
- * Preço mínimo do combo: custo_total_combo / (1 - %custo_fixo - %custo_variável -
- * margem_seguranca) — mesma fórmula do markup por receita (computeRecipePricing),
- * trocando o lucro desejado pela margem de segurança do combo.
+ * Preço sugerido do combo: custo_total_combo (soma de custo_com_perda ×
+ * quantidade de cada receita) × markup ideal — o MESMO markup usado nas
+ * receitas individuais e no card "Markup Atual" do Dashboard
+ * (computeMarkupFromCostSettings), sem nenhuma fórmula própria de combo.
  */
-export function computeComboMinPrice(
-  totalCost: number,
-  costSettings: CostSettingsCalcInput | null,
-  safetyMarginPct: number
-): ComboMinPriceResult {
-  if (!costSettings) {
-    return { minPrice: null, variablePct: 0, issue: "no_cost_settings", warning: null };
-  }
-
-  const { markup, variablePct, issue, warning } = computeMarkupWithExtra(
-    costSettings,
-    safetyMarginPct,
-    "margem de segurança"
-  );
-
-  if (issue || markup === null) {
-    return { minPrice: null, variablePct, issue, warning: null };
-  }
-
-  return { minPrice: totalCost * markup, variablePct, issue: null, warning };
-}
-
-export type ComboRecommendedResult = {
-  /** Método 1: preço somado das receitas com o desconto natural de combo (12,5%). */
-  viaSum: number;
-  /** Método 2: custo total do combo vezes o markup ideal atual; null sem markup confiável. */
-  viaCost: number | null;
-  /** Média dos dois métodos (ou só viaSum, quando viaCost não está disponível). */
-  recommended: number;
-  /** Os dois métodos divergem em mais de 15% entre si — vale revisar as margens das receitas. */
-  divergenceWarning: boolean;
-};
-
-const COMBO_NATURAL_DISCOUNT = 0.875; // ponto médio da faixa de 10-15% sugerida
-const COMBO_DIVERGENCE_THRESHOLD_PCT = 15;
-
-/** Preço recomendado do combo pelos dois métodos (via soma e via custo) e a média entre eles. */
-export function computeComboRecommendedPrice(
-  summedPrice: number,
+export function computeComboPricing(
   totalCost: number,
   costSettings: CostSettingsCalcInput | null
-): ComboRecommendedResult {
-  const viaSum = summedPrice * COMBO_NATURAL_DISCOUNT;
-  const currentMarkup = computeCurrentMarkup(costSettings);
-  const viaCost = currentMarkup !== null ? totalCost * currentMarkup : null;
-  const recommended = viaCost !== null ? (viaSum + viaCost) / 2 : viaSum;
-
-  const divergenceWarning =
-    viaCost !== null && viaSum > 0 && viaCost > 0
-      ? (Math.abs(viaSum - viaCost) / ((viaSum + viaCost) / 2)) * 100 > COMBO_DIVERGENCE_THRESHOLD_PCT
-      : false;
-
-  return { viaSum, viaCost, recommended, divergenceWarning };
-}
-
-export type ComboPromoResult = {
-  /** Preço promocional sem a trava de segurança (pode ficar abaixo do mínimo). */
-  raw: number;
-  /** Preço promocional pra exibição: nunca abaixo do mínimo. */
-  price: number;
-  /** true quando o desconto pedido faria o preço cair abaixo do mínimo — bloqueia o salvamento. */
-  belowMin: boolean;
-  /** Desconto máximo (%) que ainda mantém o preço promocional no mínimo ou acima. */
-  maxDiscountPct: number | null;
-};
-
-/** Preço promocional a partir do preço recomendado com desconto, respeitando o preço mínimo. */
-export function computeComboPromoPrice(
-  recommendedPrice: number,
-  minPrice: number | null,
-  promoDiscountPct: number
-): ComboPromoResult {
-  const raw = applyDiscount(recommendedPrice, promoDiscountPct);
-
-  if (minPrice === null) {
-    return { raw, price: raw, belowMin: false, maxDiscountPct: null };
+): ComboPricingResult {
+  if (!costSettings) {
+    return { suggestedPrice: null, variablePct: 0, issue: "no_cost_settings", warning: null };
   }
 
-  const belowMin = raw < minPrice;
-  const maxDiscountPct =
-    recommendedPrice > 0 ? Math.max(0, (1 - minPrice / recommendedPrice) * 100) : null;
+  const { markup, variablePct, issue, warning } = computeMarkupFromCostSettings(costSettings);
 
-  return { raw, price: Math.max(minPrice, raw), belowMin, maxDiscountPct };
+  if (issue || markup === null) {
+    return { suggestedPrice: null, variablePct, issue, warning: null };
+  }
+
+  return { suggestedPrice: totalCost * markup, variablePct, issue: null, warning };
 }

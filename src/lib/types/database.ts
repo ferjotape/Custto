@@ -120,9 +120,6 @@ export type Combo = {
   user_id: string;
   name: string;
   discount_pct: number;
-  safety_margin_type: "5" | "10" | "custom";
-  safety_margin_custom_pct: number | null;
-  promo_discount_pct: number;
   practiced_price: number | null;
   created_at: string;
 };

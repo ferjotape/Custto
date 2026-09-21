@@ -15,13 +15,6 @@ export const comboSchema = z.object({
 export type ComboInput = z.infer<typeof comboSchema>;
 
 export const comboPricingSchema = z.object({
-  safety_margin_type: z.enum(["5", "10", "custom"]),
-  safety_margin_custom_pct: z
-    .number()
-    .min(0, "Deve ser >= 0")
-    .max(100, "Deve ser <= 100")
-    .nullable(),
-  promo_discount_pct: z.number().min(0, "Deve ser >= 0").max(100, "Deve ser <= 100"),
   practiced_price: z.number().min(0, "Deve ser >= 0"),
 });
 
