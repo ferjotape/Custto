@@ -1,14 +1,17 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { createCombo, deleteCombo } from "./actions";
-import { formatNumber } from "@/lib/format";
+import { formatCurrency, formatNumber } from "@/lib/format";
 import { Card } from "@/components/Card";
 
 export type RecipeOption = {
   id: string;
   name: string;
+  /** Custo com perda da receita — nunca o preço sugerido. Null quando a % de perda é inválida (>= 100%). */
+  costWithLoss: number | null;
 };
 
 export type ComboItemSummary = {
@@ -26,7 +29,6 @@ export type ComboSummary = {
 
 type DraftItem = {
   recipeId: string;
-  recipeName: string;
   quantity: number;
 };
 
@@ -39,11 +41,11 @@ const inputClass =
   "w-full rounded-md border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-neutral-900 dark:border-neutral-700 dark:focus:border-neutral-100";
 
 export function ComboManager({ initialCombos, availableRecipes }: Props) {
+  const router = useRouter();
   const [combos, setCombos] = useState<ComboSummary[]>(initialCombos);
   const [name, setName] = useState("");
   const [draftItems, setDraftItems] = useState<DraftItem[]>([]);
   const [recipeId, setRecipeId] = useState("");
-  const [quantity, setQuantity] = useState("1");
   const [error, setError] = useState<string | null>(null);
   const [isSaving, startSaving] = useTransition();
   const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
@@ -54,18 +56,36 @@ export function ComboManager({ initialCombos, availableRecipes }: Props) {
     [availableRecipes]
   );
 
+  // Custo Total do Combo: soma de (custo_com_perda × quantidade) de cada
+  // linha — SEMPRE recalculado a partir do custo_com_perda de cada receita,
+  // nunca do preço sugerido. Atualiza em tempo real a cada mudança de
+  // quantidade ou item, antes de qualquer markup.
+  const custoTotalCombo = useMemo(
+    () =>
+      draftItems.reduce((sum, item) => {
+        const cost = recipesMap.get(item.recipeId)?.costWithLoss ?? 0;
+        return sum + cost * item.quantity;
+      }, 0),
+    [draftItems, recipesMap]
+  );
+
   const addItem = () => {
-    const qty = Number(quantity);
     const recipe = recipesMap.get(recipeId);
-    if (!recipe || Number.isNaN(qty) || qty <= 0) {
-      setError("Selecione uma receita e informe a quantidade.");
+    if (!recipe) {
+      setError("Selecione uma receita.");
       return;
     }
     setError(null);
-    setDraftItems((prev) => [...prev, { recipeId: recipe.id, recipeName: recipe.name, quantity: qty }]);
+    setDraftItems((prev) => [...prev, { recipeId: recipe.id, quantity: 1 }]);
     setRecipeId("");
-    setQuantity("1");
     setPickerKey((k) => k + 1);
+  };
+
+  const updateQuantity = (index: number, raw: string) => {
+    const qty = Number(raw);
+    setDraftItems((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, quantity: Number.isNaN(qty) ? 0 : qty } : item))
+    );
   };
 
   const removeDraftItem = (index: number) => {
@@ -81,6 +101,10 @@ export function ComboManager({ initialCombos, availableRecipes }: Props) {
       setError("Adicione pelo menos uma receita ao combo.");
       return;
     }
+    if (draftItems.some((item) => !(item.quantity > 0))) {
+      setError("A quantidade de cada item precisa ser maior que zero.");
+      return;
+    }
     setError(null);
     startSaving(async () => {
       const result = await createCombo({
@@ -88,22 +112,7 @@ export function ComboManager({ initialCombos, availableRecipes }: Props) {
         items: draftItems.map((item) => ({ recipe_id: item.recipeId, quantity: item.quantity })),
       });
       if (result.success && result.combo) {
-        const savedCombo = result.combo;
-        setCombos((prev) => [
-          ...prev,
-          {
-            id: savedCombo.id,
-            name: savedCombo.name,
-            items: savedCombo.items.map((item) => ({
-              id: item.id,
-              recipeId: item.recipe_id,
-              recipeName: recipesMap.get(item.recipe_id)?.name ?? "Receita removida",
-              quantity: item.quantity,
-            })),
-          },
-        ]);
-        setName("");
-        setDraftItems([]);
+        router.push(`/combos/${result.combo.id}`);
       } else {
         setError(result.error ?? "Erro ao criar combo.");
       }
@@ -160,46 +169,65 @@ export function ComboManager({ initialCombos, availableRecipes }: Props) {
                   onChange={setRecipeId}
                 />
               </div>
-              <div className="w-32">
-                <input
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  type="number"
-                  step="1"
-                  min="1"
-                  placeholder="Qtd."
-                  className={inputClass}
-                />
-              </div>
               <button
                 type="button"
                 onClick={addItem}
                 className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
               >
-                Adicionar
+                Adicionar item
               </button>
             </div>
           )}
 
           {draftItems.length > 0 && (
             <div className="flex flex-col gap-2">
-              {draftItems.map((item, index) => (
-                <div
-                  key={`${item.recipeId}-${index}`}
-                  className="flex items-center justify-between gap-3 rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
-                >
-                  <span>
-                    {formatNumber(item.quantity)}x {item.recipeName}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeDraftItem(index)}
-                    className="text-xs text-neutral-500 hover:underline"
+              {draftItems.map((item, index) => {
+                const recipe = recipesMap.get(item.recipeId);
+                return (
+                  <div
+                    key={`${item.recipeId}-${index}`}
+                    className="grid grid-cols-[1fr_7rem_5rem_2.25rem] items-center gap-2 rounded-md border border-neutral-300 p-2 dark:border-neutral-700"
                   >
-                    Remover
-                  </button>
-                </div>
-              ))}
+                    <span className="truncate text-sm">{recipe?.name ?? "Receita removida"}</span>
+                    <span className="text-right text-xs text-neutral-500">
+                      Custo:{" "}
+                      <span className="font-mono">
+                        {recipe?.costWithLoss !== null && recipe?.costWithLoss !== undefined
+                          ? formatCurrency(recipe.costWithLoss)
+                          : "—"}
+                      </span>
+                    </span>
+                    <input
+                      value={item.quantity}
+                      onChange={(e) => updateQuantity(index, e.target.value)}
+                      type="number"
+                      step="1"
+                      min="1"
+                      aria-label={`Quantidade de ${recipe?.name ?? "item"}`}
+                      className="w-full rounded-md border border-neutral-300 px-2 py-1.5 text-right text-sm outline-none focus:border-neutral-900 dark:border-neutral-700 dark:focus:border-neutral-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeDraftItem(index)}
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-neutral-300 text-neutral-500 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-900"
+                      aria-label="Remover item"
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+
+              <div className="flex items-center justify-between rounded-md border border-accent/40 bg-accent/5 px-3 py-2">
+                <span className="text-sm font-medium">Custo Total do Combo</span>
+                <span className="font-mono text-base font-semibold">
+                  {formatCurrency(custoTotalCombo)}
+                </span>
+              </div>
+              <p className="px-1 text-xs text-neutral-400">
+                Soma do custo com perda de cada item pela quantidade — sem nenhum markup ainda. O
+                preço sugerido é calculado na tela do combo depois de salvar.
+              </p>
             </div>
           )}
 
@@ -299,9 +327,12 @@ function RecipePicker({
                   setQuery(recipe.name);
                   setIsOpen(false);
                 }}
-                className="block w-full px-3 py-2 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
               >
-                {recipe.name}
+                <span>{recipe.name}</span>
+                <span className="shrink-0 font-mono text-xs text-neutral-400">
+                  {recipe.costWithLoss !== null ? formatCurrency(recipe.costWithLoss) : "—"}
+                </span>
               </button>
             </li>
           ))}
